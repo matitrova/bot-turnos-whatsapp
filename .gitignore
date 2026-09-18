@@ -1,0 +1,14 @@
+# Secretos — NUNCA subir
+.env
+*credenciales*.json
+*credentials*.json
+*.pem
+token.json
+
+# Entorno
+venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
