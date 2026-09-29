@@ -1,9 +1,10 @@
 # Bot de turnos por WhatsApp
 
-Un agente de IA que atiende los mensajes de WhatsApp de un lavadero de autos y
-crea, mueve y cancela los turnos directamente en Google Calendar. El cliente
-escribe como le escribiría a una persona; el turno aparece en el calendario del
-dueño sin que nadie lo cargue a mano.
+Un agente de IA que agenda solo los turnos de un lavadero de autos. Es pasivo:
+nunca le contesta al cliente. Lee la conversación de WhatsApp entre el cliente y
+el dueño, que sigue atendiendo desde su celular como siempre, y cuando los dos
+acuerdan un día y una hora, crea, mueve o cancela el turno en Google Calendar.
+Nadie carga nada a mano.
 
 ## Cómo funciona
 
@@ -70,6 +71,11 @@ El agente consulta `buscar_turnos` antes de crear, para no duplicar.
 - `configurar_herramientas.py` — declara las herramientas del agente.
 - `probar_calendario.py` — prueba aislada de la conexión con Google Calendar.
 - `Probar_Agente.py` — prueba aislada de la conversación con el agente.
+- `prompt_agente.md` — el prompt del agente. Se edita acá, no en la plataforma.
+- `actualizar_prompt.py` — sube `prompt_agente.md` al agente (crea una versión
+  nueva solo si cambió).
+- `probar_prompt.py` — corre conversaciones armadas contra `prompt_agente.md`
+  con un calendario de mentira, antes de subirlo. No toca Google Calendar.
 
 ## Cómo correrlo
 
@@ -104,6 +110,10 @@ Pendiente antes de ponerlo en producción:
 - Verificar la firma del webhook de Kapso.
 - El código busca `google-credenciales.json` en minúscula. En macOS da igual,
   pero en un hosting Linux hay que respetar el nombre exacto.
+- Las duraciones de los servicios en `prompt_agente.md` son estimaciones del
+  rubro, no datos del lavadero. Confirmarlas con el dueño.
+- El horario (lunes a viernes 8:30 a 18:00, sábados 9:00 a 18:30) sale de la
+  página; en el Instagram hay un posteo que dice 9:30. Confirmarlo.
 
 ## Probado como QA
 
@@ -118,3 +128,12 @@ Encontré dos errores del agente probándolo con conversaciones reales:
 
 Los dos se corrigen en el prompt, y los dos aparecieron recién al probar
 conversaciones completas, no casos sueltos.
+
+`probar_prompt.py` los deja como casos fijos. Antes de confiar en un caso, lo
+corrí también contra el prompt anterior, para ver que ahí fallara:
+
+- El servicio inventado y las duraciones sí fallan con el prompt anterior
+  ("Lavado - Martín", 90 minutos para un cerámico) y pasan con el nuevo.
+- El error del nombre ya no se reproduce con el modelo actual, ni siquiera con
+  el prompt anterior. La regla queda en el prompt como protección, pero la
+  prueba no puede demostrar que sea ella la que lo evita.
