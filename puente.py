@@ -132,7 +132,7 @@ def aplicar(decision, telefono, turnos):
             if accion.tipo == "crear":
                 inicio = a_fecha(accion.inicio)
                 if any(datetime.fromisoformat(t["inicio"]) == inicio for t in turnos):
-                    resultados.append(f"crear {accion.inicio}: ya había un turno a esa hora, no se creó otro")
+                    resultados.append(f"no se creó «{accion.titulo}» {accion.inicio}: ya había un turno a esa hora")
                     continue
                 fin = inicio + timedelta(minutes=int(accion.duracion_minutos))
                 creado = insertar_evento({
@@ -143,7 +143,7 @@ def aplicar(decision, telefono, turnos):
                     "extendedProperties": {"private": {"telefono": telefono}},
                 })
                 turnos.append({"evento_id": creado["id"], "inicio": inicio.isoformat(), "titulo": accion.titulo})
-                resultados.append(f"crear {accion.inicio}: creado, evento_id={creado['id']}")
+                resultados.append(f"creado «{accion.titulo}» {accion.inicio}, evento_id={creado['id']}")
             else:
                 evento = turno_del_cliente(accion.evento_id, telefono)
                 if evento is None:
@@ -155,10 +155,10 @@ def aplicar(decision, telefono, turnos):
                     evento["start"] = {"dateTime": inicio.isoformat()}
                     evento["end"] = {"dateTime": fin.isoformat()}
                     actualizar_evento(evento)
-                    resultados.append(f"mover {accion.evento_id} a {accion.inicio}: movido")
+                    resultados.append(f"movido «{evento.get('summary', '')}» a {accion.inicio}")
                 else:
                     borrar_evento(evento["id"])
-                    resultados.append(f"cancelar {accion.evento_id}: cancelado")
+                    resultados.append(f"cancelado «{evento.get('summary', '')}» {evento['start']['dateTime']}")
         except Exception as error:
             resultados.append(f"{accion.tipo}: ERROR {error}")
     if decision.aviso_al_dueno:
@@ -266,7 +266,7 @@ def evaluar(telefono, ahora):
                            (telefono, desde)).fetchall()
         sin_leer = db.execute("SELECT id FROM mensajes WHERE telefono = ? AND leido = 0",
                               (telefono,)).fetchall()
-        previas = db.execute("SELECT fecha, decision FROM decisiones WHERE telefono = ? "
+        previas = db.execute("SELECT fecha, decision, resultados FROM decisiones WHERE telefono = ? "
                              "ORDER BY id DESC LIMIT 5", (telefono,)).fetchall()
     ids_sin_leer = [f["id"] for f in sin_leer]
     anteriores = [f["linea"] for f in filas if f["leido"]]
@@ -283,12 +283,11 @@ def evaluar(telefono, ahora):
         marcar_leidos()
         return
 
-    decisiones_previas = []
-    for previa in reversed(previas):
-        d = json.loads(previa["decision"])
-        cuando = con_dia(datetime.fromtimestamp(previa["fecha"], ZONA))
-        aviso = f" (aviso al dueño: {d['aviso_al_dueno']})" if d.get("aviso_al_dueno") else ""
-        decisiones_previas.append(f"[{cuando}] {d['resumen']}{aviso}")
+    decisiones_previas = [
+        decidir.contar_decision(con_dia(datetime.fromtimestamp(p["fecha"], ZONA)),
+                                decidir.Decision.model_validate_json(p["decision"]), json.loads(p["resultados"]))
+        for p in reversed(previas)
+    ]
 
     pedido = decidir.armar_pedido(con_dia(datetime.fromtimestamp(ahora, ZONA)), telefono, nombre,
                                   anteriores, nuevos, turnos, decisiones_previas)

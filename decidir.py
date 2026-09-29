@@ -83,6 +83,15 @@ def armar_pedido(ahora, telefono, nombre, anteriores, nuevos, turnos, decisiones
     )
 
 
+def contar_decision(cuando, decision, resultados):
+    """Cómo aparece una decisión anterior en LO QUE YA DECIDISTE: el resumen, el
+    aviso y lo que de verdad se ejecutó, con el título de cada turno (así, si un
+    turno se canceló, el modelo todavía sabe qué servicio tenía)."""
+    aviso = f" (aviso al dueño: {decision.aviso_al_dueno})" if decision.aviso_al_dueno else ""
+    hecho = f" — hecho: {'; '.join(r for r in resultados if not r.startswith('aviso'))}" if resultados else ""
+    return f"[{cuando}] {decision.resumen}{aviso}{hecho}"
+
+
 def decidir(cliente, pedido):
     """Devuelve (Decision, uso). Una sola llamada; el prompt queda en caché."""
     parametros = dict(

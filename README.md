@@ -143,15 +143,22 @@ La versión con agente y herramientas funcionó de punta a punta el 18/09: un
 mensaje de WhatsApp terminó siendo un turno real en Google Calendar, y una
 cancelación lo borró y avisó al dueño.
 
-Esta versión (una llamada por tanda) pasa `probar_puente.py` completo, pero
-**todavía no se corrió `probar_prompt.py` contra el modelo**: se terminó el
-crédito de la API. Hay que hacerlo antes de usarla, y de paso comparar con
-Haiku (cuesta la mitad; su caché pide un prompt de al menos 4.096 tokens y este
-anda cerca, así que puede que no se cachee).
+Esta versión (una llamada por tanda) pasa `probar_puente.py` completo y los 13
+casos de `probar_prompt.py` con Claude Sonnet 5, en dos corridas seguidas.
+
+**Costo medido:** US$ 0,0015 por mensaje con Sonnet 5 (73 mensajes, 29 llamadas,
+US$ 0,109), con el prompt ya en caché. La versión con agente medía US$ 0,005 por
+mensaje en las mismas condiciones.
+
+**Haiku 4.5 no alcanza.** Cuesta la mitad por token (US$ 0,0016 por mensaje en
+una corrida donde el prompt se cacheó 7 veces), pero se equivoca en cosas que
+importan: inventa una hora (agenda a las 8:30 algo que nadie dijo), pone mal la
+fecha en un aviso ("sábado 04/10", que es domingo), le dice al dueño que canceló
+el cliente cuando canceló él por la lluvia, agenda una contraoferta antes de que
+la acepten, y supone el servicio en 5 turnos. Se queda Sonnet 5.
 
 Pendiente antes de ponerlo en producción:
 
-- Correr `probar_prompt.py` con crédito y comparar modelos.
 - Conectar el número real del lavadero.
 - Aviso al dueño por WhatsApp: hoy sale por consola; falta la plantilla aprobada
   por Meta, y tiene que ir a otro número del dueño (no al del negocio).

@@ -260,15 +260,15 @@ def correr(caso):
         salida.append(f"   -> {'; '.join(resultados) or 'sin cambios'}  "
                       f"(US$ {costo:.4f}; caché leída {uso.cache_read_input_tokens or 0}, "
                       f"escrita {uso.cache_creation_input_tokens or 0}, salida {uso.output_tokens})")
-        aviso = f" (aviso al dueño: {decision.aviso_al_dueno})" if decision.aviso_al_dueno else ""
-        previas.append(f"[{puente.con_dia(ahora)}] {decision.resumen}{aviso}")
+        previas.append(decidir.contar_decision(puente.con_dia(ahora), decision, resultados))
         leidas += tanda
     salida.append(f"   TOTAL DEL CASO: {llamadas} llamada(s), US$ {costo_total:.4f}")
     return "\n".join(salida), llamadas, costo_total, len(caso["lineas"])
 
 
 elegidos = [c for c in CASOS if not FILTROS or any(f in c["nombre"].lower() for f in FILTROS)]
-with ThreadPoolExecutor(max_workers=7) as hilos:
+# HILOS=1 corre los casos de a uno: el prompt se cachea una sola vez, como en el uso real.
+with ThreadPoolExecutor(max_workers=int(os.environ.get("HILOS", 7))) as hilos:
     resultados = list(hilos.map(correr, elegidos))
 for texto, *_ in resultados:
     print(texto)
