@@ -68,7 +68,7 @@ CASOS = [
     },
     {
         "nombre": "Cancela saludando a Facu",
-        "esperado": "CANCELADO del turno del mié 30/09 10:00. En el aviso, el cliente NO es Facu (no tiene nombre).",
+        "esperado": "CANCELADO del turno del mié 30/09 10:00. Aviso con fecha 2026-09-30, y el cliente NO es Facu.",
         "turnos_previos": [
             {"evento_id": "prueba-previo", "inicio": "2026-09-30T10:00:00-03:00", "titulo": "Lavado completo"},
         ],
@@ -102,7 +102,7 @@ CASOS = [
     },
     {
         "nombre": "Día acordado sin hora",
-        "esperado": "Ningún turno. UN solo aviso al dueño: sáb 03/10 a la mañana sin hora, cliente Nico.",
+        "esperado": "Ningún turno. UN solo aviso al dueño, con fecha 2026-10-03: sáb a la mañana sin hora, cliente Nico.",
         "lineas": charla("5492664000007", "Nico",
                          (f"{HOY} 09:18", "C", "Amigoo como andas? Buen día"),
                          (f"{HOY} 09:20", "C", "Tenes turno para lavar el auto?"),
@@ -174,6 +174,13 @@ CASOS = [
                          (f"{HOY} 15:14", "C", "Bueno por las dudas preguntaba\nMe imagine\nGracias")),
     },
     {
+        "nombre": "Charla personal que nombra un auto",
+        "esperado": "NADA: es una charla personal del dueño, aunque haya día, hora y un auto.",
+        "lineas": charla("5492664000014", "Vale",
+                         (f"{HOY} 18:00", "C", "Facu, el sábado a las 11 pasás a buscar a mamá con el auto?"),
+                         (f"{HOY} 18:05", "L", "dale, ahí voy")),
+    },
+    {
         "nombre": "Confirman la hora dos veces",
         "esperado": "UN solo CREADO mar 29/09 14:00, Fiat Adventure. Después no cancela ni vuelve a crear.",
         "lineas": charla("5492664000013", "Caro",
@@ -202,13 +209,13 @@ def insertar_evento(evento):
 
 
 puente.listar_eventos = lambda tel: sorted(
-    (e for e in eventos.values() if e["extendedProperties"]["private"]["telefono"] == tel),
+    (e for e in eventos.values() if e["extendedProperties"]["private"].get("telefono") == tel),
     key=lambda e: e["start"]["dateTime"])
 puente.obtener_evento = lambda evento_id: dict(eventos[evento_id])
 puente.insertar_evento = insertar_evento
 puente.actualizar_evento = lambda evento: eventos.update({evento["id"]: evento})
 puente.borrar_evento = lambda evento_id: eventos.pop(evento_id)
-puente.avisar_al_dueno = lambda texto: None
+puente.avisar_al_dueno = lambda texto, fecha, telefono: None
 
 FECHA = re.compile(r"^\[\w+ (\d\d/\d\d/\d{4} \d\d:\d\d)\]")
 CLIENTE = re.compile(r"\] CLIENTE \((\d+), ([^)]*)\)")
@@ -236,8 +243,9 @@ def correr(caso):
         for linea in tanda:
             salida.append(">> " + linea.replace("\n", " / "))
         turnos = puente.turnos_del_cliente(telefono)
-        if not decidir.hay_que_evaluar(tanda, leidas, bool(turnos)):
-            salida.append("   (nadie contestó todavía: no se le pregunta al modelo)")
+        motivo = decidir.por_que_no_leer(tanda, leidas, bool(turnos))
+        if motivo:
+            salida.append(f"   (no se le pregunta al modelo: {motivo})")
             leidas += tanda
             continue
         ahora = datetime.strptime(FECHA.match(tanda[-1]).group(1), "%d/%m/%Y %H:%M") + decidir.ESPERA
@@ -255,7 +263,7 @@ def correr(caso):
             salida.append(f"   [{accion.tipo}] " + ", ".join(
                 f"{k}={v}" for k, v in accion.model_dump().items() if v is not None and k != "tipo"))
         if decision.aviso_al_dueno:
-            salida.append(f"   [aviso al dueño] {decision.aviso_al_dueno}")
+            salida.append(f"   [aviso al dueño, {decision.aviso_fecha}] {decision.aviso_al_dueno}")
         salida.append(f"   RESUMEN: {decision.resumen}")
         salida.append(f"   -> {'; '.join(resultados) or 'sin cambios'}  "
                       f"(US$ {costo:.4f}; caché leída {uso.cache_read_input_tokens or 0}, "

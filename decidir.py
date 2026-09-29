@@ -5,6 +5,8 @@ que producción. Acá no se toca el calendario: se devuelve qué hacer y el
 puente lo ejecuta, verificando que cada turno sea del cliente que escribe.
 """
 import os
+import re
+import unicodedata
 from datetime import timedelta
 from typing import List, Literal, Optional
 
@@ -28,6 +30,12 @@ with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "prompt_agent
 
 SIN_CONTENIDO = ("[AUDIO]", "[STICKER]", "[IMAGEN]", "[VIDEO]", "[DOCUMENT]", "[REACTION]")
 
+# El WhatsApp del lavadero es también el personal del dueño. Una charla se lee
+# solo si en la ventana nombra algo del lavadero (o si el cliente tiene turnos).
+TEMA_DEL_LAVADERO = re.compile(
+    r"\b(turn|lav[aáeé]|auto(s)?\b|coche|camionet|chata|motos?\b|pick|hilux|pulid|pulir|ceramic|tapiz|"
+    r"asiento|optica|faro|sellad|detail|tablero|vehicul|traela|traelo|te (lo|la) (llevo|dejo)|autoshine)")
+
 
 class Accion(BaseModel):
     tipo: Literal["crear", "mover", "cancelar"]
@@ -41,6 +49,7 @@ class Accion(BaseModel):
 class Decision(BaseModel):
     acciones: List[Accion]
     aviso_al_dueno: Optional[str]
+    aviso_fecha: Optional[str]        # AAAA-MM-DD: el día al que se refiere el aviso
     resumen: str
 
 
@@ -53,17 +62,36 @@ def tiene_contenido(linea):
     return texto.strip() not in SIN_CONTENIDO
 
 
-def hay_que_evaluar(nuevos, anteriores, tiene_turnos):
-    """Un turno se acuerda cuando la otra persona contesta. Por eso la tanda se
-    lee solo si es una respuesta, o si el cliente ya tiene turnos (puede estar
-    cancelando o cambiando). El primer mensaje de un chat es una consulta."""
+def sin_tildes(texto):
+    return "".join(c for c in unicodedata.normalize("NFD", texto.lower()) if unicodedata.category(c) != "Mn")
+
+
+def es_del_lavadero(lineas):
+    return any(TEMA_DEL_LAVADERO.search(sin_tildes(l.split(": ", 1)[-1])) for l in lineas)
+
+
+def por_que_no_leer(nuevos, anteriores, tiene_turnos):
+    """None si hay que preguntarle al modelo; si no, el motivo.
+
+    Un turno se acuerda cuando la otra persona contesta: la tanda se lee solo si
+    es una respuesta, o si el cliente ya tiene turnos (puede estar cancelando).
+    El primer mensaje de un chat es una consulta. Y como el número es también el
+    personal del dueño, la charla tiene que ser del lavadero."""
     if not any(tiene_contenido(l) for l in nuevos):
-        return False
+        return "solo stickers, fotos o audios sin transcribir"
     if tiene_turnos:
-        return True
+        return None
+    if not es_del_lavadero(anteriores + nuevos):
+        return "la charla no es del lavadero"
     if len({lado(l) for l in nuevos}) > 1:
-        return True
-    return bool(anteriores) and lado(anteriores[-1]) != lado(nuevos[0])
+        return None
+    if anteriores and lado(anteriores[-1]) != lado(nuevos[0]):
+        return None
+    return "nadie contestó todavía"
+
+
+def hay_que_evaluar(nuevos, anteriores, tiene_turnos):
+    return por_que_no_leer(nuevos, anteriores, tiene_turnos) is None
 
 
 def armar_pedido(ahora, telefono, nombre, anteriores, nuevos, turnos, decisiones_previas):

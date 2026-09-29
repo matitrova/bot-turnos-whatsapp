@@ -31,6 +31,35 @@ WhatsApp  →  Kapso  →  puente (Flask + SQLite)  →  modelo (1 llamada por t
    que avisarle al dueño y un resumen. **El puente lo ejecuta**, con sus
    controles.
 
+## El número es también el personal del dueño
+
+Facundo usa el mismo WhatsApp para el lavadero y para su vida. El bot ve todos
+sus chats (los grupos no), así que:
+
+- **Lista de ignorados** (`datos/ignorar.txt`, un número por línea, admite
+  comentarios con `#`): los mensajes de esos números ni se guardan. Se lee en
+  cada mensaje, se puede editar sin reiniciar.
+- **Filtro por tema**: solo se le pregunta al modelo si en los últimos 7 días la
+  charla nombra algo del lavadero (turno, lavar, auto, chata, moto, pulido,
+  cerámico, "traela"…) o si el cliente tiene un turno. Una charla personal sin
+  nada de eso no sale del puente.
+- **Regla en el prompt**: si igual llega una charla personal ("¿el sábado a las
+  11 pasás a buscar a mamá con el auto?"), responde NADA.
+- **Los mensajes se borran a los 8 días**: pasada la ventana no sirven más.
+- Al conectar el número, **no compartir los chats viejos**: incluirían todo lo
+  personal.
+- **Los avisos no van por WhatsApp** (sería mandarse un mensaje a sí mismo): son
+  eventos "⚠" de todo el día en el calendario de turnos, el día al que se
+  refieren, en rojo. No llevan el teléfono como turno, así el bot no los
+  confunde con uno. Para que le lleguen al celular, el dueño activa en Google
+  Calendar una notificación para eventos de todo el día en ese calendario (por
+  ejemplo, el día anterior a las 20).
+
+Límite conocido: Whisper a veces deforma las palabras de un audio ("la
+balacamio" por "lavar la camioneta"), y un chat que solo tuviera eso no pasaría
+el filtro. En las charlas reales siempre aparece otra palabra ("traela", "qué
+vehículo").
+
 ## La seguridad no está en el prompt
 
 Un modelo hace lo que el prompt le pide, salvo cuando no. Si la única defensa
@@ -109,7 +138,8 @@ convertirlos en casos de prueba.
 - `probar_calendario.py` — prueba aislada de la conexión con Google Calendar.
 
 No van al repo: `conversaciones-reales/` (charlas y audios de clientes, datos
-personales), `datos/` (la base del puente) y `modelos/` (Whisper, 466 MB).
+personales), `datos/` (la base del puente y la lista de ignorados) y `modelos/`
+(Whisper, 466 MB).
 
 ## Cómo correrlo
 
@@ -144,7 +174,8 @@ mensaje de WhatsApp terminó siendo un turno real en Google Calendar, y una
 cancelación lo borró y avisó al dueño.
 
 Esta versión (una llamada por tanda) pasa `probar_puente.py` completo y los 13
-casos de `probar_prompt.py` con Claude Sonnet 5, en dos corridas seguidas.
+casos de `probar_prompt.py` con Claude Sonnet 5, en dos corridas seguidas (y el
+caso 14, una charla personal, desde que se sumó).
 
 **Costo medido:** US$ 0,0015 por mensaje con Sonnet 5 (73 mensajes, 29 llamadas,
 US$ 0,109), con el prompt ya en caché. La versión con agente medía US$ 0,005 por
@@ -160,8 +191,8 @@ la acepten, y supone el servicio en 5 turnos. Se queda Sonnet 5.
 Pendiente antes de ponerlo en producción:
 
 - Conectar el número real del lavadero.
-- Aviso al dueño por WhatsApp: hoy sale por consola; falta la plantilla aprobada
-  por Meta, y tiene que ir a otro número del dueño (no al del negocio).
+- Que el dueño active la notificación de eventos de todo el día en el
+  calendario de turnos, y arme `datos/ignorar.txt` con sus contactos personales.
 - Hosting 24/7 en vez de una máquina local con ngrok. Tiene que poder correr
   `ffmpeg` y `whisper-cli`, o cambiar la transcripción por un servicio.
 - Si la ubicación para un retiro llega después de agendado el turno, hoy no se

@@ -25,6 +25,7 @@ CALENDAR_ID = os.environ["CALENDAR_ID"]
 KAPSO_API_KEY = os.environ["KAPSO_API_KEY"]
 KAPSO_WEBHOOK_SECRET = os.environ["KAPSO_WEBHOOK_SECRET"]
 BASE_DE_DATOS = os.environ.get("BASE_DE_DATOS", "datos/bot.db")
+IGNORAR = os.environ.get("IGNORAR", "datos/ignorar.txt")  # números personales del dueño, uno por línea
 ZONA = ZoneInfo("America/Argentina/Buenos_Aires")
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 MODELO_WHISPER = "modelos/ggml-small.bin"
@@ -121,8 +122,23 @@ def turno_del_cliente(evento_id, telefono):
     return evento
 
 
-def avisar_al_dueno(texto):
-    print("📣 AVISO AL DUEÑO:", texto)
+def avisar_al_dueno(texto, fecha, telefono):
+    """El número del lavadero es el personal del dueño, así que el aviso no puede
+    ir por WhatsApp: va como evento de todo el día en su calendario, el día al que
+    se refiere. No lleva la propiedad "telefono", así no aparece como turno."""
+    try:
+        dia = datetime.strptime(fecha, "%Y-%m-%d").date() if fecha else datetime.now(ZONA).date()
+    except ValueError:
+        dia = datetime.now(ZONA).date()
+    insertar_evento({
+        "summary": "⚠ " + texto[:80],
+        "description": f"{texto}\nTeléfono del cliente: {telefono}\n(Aviso del bot de turnos)",
+        "start": {"date": dia.isoformat()},
+        "end": {"date": (dia + timedelta(days=1)).isoformat()},
+        "colorId": "11",
+        "extendedProperties": {"private": {"aviso_de": telefono}},
+    })
+    print("📣 AVISO AL DUEÑO:", dia, texto)
 
 
 def aplicar(decision, telefono, turnos):
@@ -162,8 +178,11 @@ def aplicar(decision, telefono, turnos):
         except Exception as error:
             resultados.append(f"{accion.tipo}: ERROR {error}")
     if decision.aviso_al_dueno:
-        avisar_al_dueno(decision.aviso_al_dueno)
-        resultados.append("aviso al dueño enviado")
+        try:
+            avisar_al_dueno(decision.aviso_al_dueno, decision.aviso_fecha, telefono)
+            resultados.append("aviso al dueño enviado")
+        except Exception as error:
+            resultados.append(f"aviso al dueño: ERROR {error}")
     return resultados
 
 
@@ -278,8 +297,9 @@ def evaluar(telefono, ahora):
             db.executemany("UPDATE mensajes SET leido = 1 WHERE id = ?", [(i,) for i in ids_sin_leer])
 
     turnos = turnos_del_cliente(telefono)
-    if not nuevos or not decidir.hay_que_evaluar(nuevos, anteriores, bool(turnos)):
-        print(f"{telefono}: nadie contestó todavía, no hace falta preguntarle al modelo")
+    motivo = decidir.por_que_no_leer(nuevos, anteriores, bool(turnos)) if nuevos else "no hay mensajes nuevos"
+    if motivo:
+        print(f"{telefono}: no se le pregunta al modelo ({motivo})")
         marcar_leidos()
         return
 
@@ -312,6 +332,9 @@ def revisar_chats(ahora=None):
     """Lee los chats donde hay mensajes sin leer y nadie escribió en los últimos minutos."""
     ahora = ahora or time.time()
     with base() as db:
+        # Pasada la ventana, los mensajes no sirven más: se borran (muchos son personales).
+        db.execute("DELETE FROM mensajes WHERE fecha < ?",
+                   (ahora - (decidir.VENTANA + timedelta(days=1)).total_seconds(),))
         listos = db.execute("SELECT telefono FROM mensajes WHERE leido = 0 GROUP BY telefono "
                             "HAVING MAX(recibido) <= ?", (ahora - decidir.ESPERA.total_seconds(),)).fetchall()
     for fila in listos:
@@ -338,9 +361,22 @@ def firma_valida(cuerpo, firma):
     return bool(firma) and hmac.compare_digest(firma, esperada)
 
 
+def ignorados():
+    try:
+        with open(IGNORAR, encoding="utf-8") as archivo:
+            numeros = ("".join(c for c in l.split("#")[0] if c.isdigit()) for l in archivo)
+            return {n for n in numeros if n}
+    except FileNotFoundError:
+        return set()
+
+
 def encolar(datos):
     mensaje = datos["message"]
     conversacion = datos["conversation"]
+
+    telefono = "".join(c for c in (conversacion.get("phone_number") or "") if c.isdigit())
+    if telefono and telefono in ignorados():
+        return  # contacto personal del dueño: ni se guarda
 
     if mensaje.get("kapso", {}).get("origin") == "history_sync":
         return  # chats viejos que Kapso importa: sirven para aprender, no para agendar

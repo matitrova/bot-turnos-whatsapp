@@ -16,6 +16,9 @@ from types import SimpleNamespace
 
 CARPETA = tempfile.mkdtemp()
 os.environ["BASE_DE_DATOS"] = os.path.join(CARPETA, "prueba.db")
+os.environ["IGNORAR"] = os.path.join(CARPETA, "ignorar.txt")
+with open(os.environ["IGNORAR"], "w") as archivo:
+    archivo.write("# familia\n+54 9 266 999-9999  # hermana\n")
 os.environ.setdefault("KAPSO_API_KEY", "clave-de-prueba")
 os.environ.setdefault("KAPSO_WEBHOOK_SECRET", "secreto-de-prueba")
 import puente  # noqa: E402
@@ -26,7 +29,7 @@ eventos = {}
 
 
 def listar_eventos(telefono):
-    return [e for e in eventos.values() if e["extendedProperties"]["private"]["telefono"] == telefono]
+    return [e for e in eventos.values() if e["extendedProperties"]["private"].get("telefono") == telefono]
 
 
 def insertar_evento(evento):
@@ -64,8 +67,8 @@ def crear(inicio, titulo="Lavado completo - Prueba"):
                   descripcion="prueba")
 
 
-def decision(*acciones, aviso=None, resumen="NADA"):
-    return Decision(acciones=list(acciones), aviso_al_dueno=aviso, resumen=resumen)
+def decision(*acciones, aviso=None, fecha=None, resumen="NADA"):
+    return Decision(acciones=list(acciones), aviso_al_dueno=aviso, aviso_fecha=fecha, resumen=resumen)
 
 
 # ---------- Audio de prueba y descarga de Kapso de mentira ----------
@@ -191,9 +194,13 @@ puente.revisar_chats(mas_tarde())  # deja leídos estos dos chats para que no mo
 # ---------- Cuándo se le pregunta al modelo ----------
 revisar("regla: primer mensaje de un chat no", not hay_que_evaluar(["[x] CLIENTE (1, a): hola"], [], False))
 revisar("regla: respuesta del otro lado sí",
-        hay_que_evaluar(["[x] LAVADERO: dale"], ["[x] CLIENTE (1, a): mañana a las 10?"], False))
+        hay_que_evaluar(["[x] LAVADERO: dale"], ["[x] CLIENTE (1, a): mañana a las 10 te llevo el auto?"], False))
 revisar("regla: el mismo lado insiste, no",
         not hay_que_evaluar(["[x] CLIENTE (1, a): ?"], ["[x] CLIENTE (1, a): hay turno?"], False))
+revisar("regla: charla personal sin nada del lavadero, no",
+        not hay_que_evaluar(["[x] LAVADERO: dale"], ["[x] CLIENTE (1, a): mañana a las 10 me pasás a buscar?"], False))
+revisar("regla: el tema se reconoce sin tildes ni mayúsculas",
+        hay_que_evaluar(["[x] LAVADERO: sisi"], ["[x] CLIENTE (1, a): LAVÁS MOTOS?"], False))
 revisar("regla: con un turno agendado, sí", hay_que_evaluar(["[x] CLIENTE (1, a): cancelame"], [], True))
 revisar("regla: solo un sticker, no",
         not hay_que_evaluar(["[x] CLIENTE (1, a): [STICKER]"], ["[x] LAVADERO: dale"], True))
@@ -246,11 +253,34 @@ puente.revisar_chats(mas_tarde())
 revisar("si falla el modelo, no reintenta enseguida", len(pedidos) == llamadas)
 respuestas.append(decision(Accion(tipo="cancelar", evento_id=listar_eventos(C)[0]["id"], inicio=None,
                                   duracion_minutos=None, titulo=None, descripcion=None),
-                           aviso="Canceló el cliente", resumen="CANCELADO"))
+                           aviso="Canceló el cliente", fecha="2026-09-30", resumen="CANCELADO"))
 puente.revisar_chats(mas_tarde(minutos=6))
 revisar("a los 5 minutos reintenta y los mensajes no se perdieron",
         len(pedidos) == llamadas + 1 and "NUEVO" in pedidos[-1] and "cancelame" in pedidos[-1])
 revisar("canceló el turno del cliente", listar_eventos(C) == [], eventos)
+avisos = [e for e in eventos.values() if e["extendedProperties"]["private"].get("aviso_de") == C]
+revisar("el aviso queda en el calendario ese día, todo el día",
+        len(avisos) == 1 and avisos[0]["start"] == {"date": "2026-09-30"} and avisos[0]["summary"].startswith("⚠"),
+        avisos)
+revisar("el aviso no aparece como turno del cliente", puente.turnos_del_cliente(C) == [], puente.turnos_del_cliente(C))
+
+# ---------- Charlas personales del dueño ----------
+enviar(mensaje("p1", "inbound", texto="Facu, mañana a las 10 lavamos el auto de papá?", telefono="5492669999999"))
+revisar("un número de la lista de ignorados ni se guarda", lineas("5492669999999") == [])
+P = "5492664444444"
+enviar(mensaje("p2", "inbound", texto="mañana a las 10 me pasás a buscar?", telefono=P))
+enviar(mensaje("p3", "outbound", texto="dale", origen="business_app", telefono=P), evento="whatsapp.message.sent")
+llamadas = len(pedidos)
+puente.revisar_chats(mas_tarde())
+revisar("charla personal que no habla del lavadero: no llama al modelo", len(pedidos) == llamadas)
+
+with puente.base() as db:
+    db.execute("INSERT INTO mensajes VALUES ('viejo', ?, 'x', 'vieja', ?, ?, 1)",
+               (P, time.time() - 9 * 86400, time.time() - 9 * 86400))
+puente.revisar_chats(mas_tarde())
+with puente.base() as db:
+    queda = db.execute("SELECT COUNT(*) FROM mensajes WHERE id = 'viejo'").fetchone()[0]
+revisar("los mensajes de más de 8 días se borran", queda == 0)
 
 with puente.base() as db:
     guardadas = db.execute("SELECT COUNT(*) FROM decisiones WHERE telefono = ?", (C,)).fetchone()[0]
