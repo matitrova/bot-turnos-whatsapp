@@ -1,29 +1,35 @@
 """Prueba prompt_agente.md con conversaciones armadas, sin tocar Google Calendar.
 
-Cada caso corre en una sesión de prueba que usa el prompt del archivo en vez del
-que tiene el agente publicado, así se puede probar un cambio antes de subirlo con
-actualizar_prompt.py. El calendario es de mentira: vive en memoria y se imprime.
+Corre la misma lógica que el puente: parte cada charla en tandas según los
+horarios (un chat se lee después de ESPERA sin mensajes), le pregunta al modelo
+solo cuando hace falta (decidir.hay_que_evaluar) y ejecuta la decisión con
+puente.aplicar() sobre un calendario de mentira. Al final muestra el costo.
 
 Los casos salen de charlas reales del lavadero, con nombres y teléfonos cambiados.
-Corren en paralelo y cada uno se imprime entero al final.
 
 Uso: python probar_prompt.py [archivo.md] [parte del nombre de un caso ...]
      Sin archivo usa prompt_agente.md; sin nombres corre todos los casos.
+     Para probar otro modelo: MODELO=claude-haiku-4-5 python probar_prompt.py
 """
+import itertools
 import os
+import re
 import sys
+import tempfile
 from concurrent.futures import ThreadPoolExecutor
-from dotenv import load_dotenv
-import anthropic
+from datetime import datetime, timedelta
 
-load_dotenv(override=True)
-cliente = anthropic.Anthropic()
+os.environ["BASE_DE_DATOS"] = os.path.join(tempfile.mkdtemp(), "prueba.db")
+os.environ.setdefault("KAPSO_API_KEY", "no-se-usa")
+os.environ.setdefault("KAPSO_WEBHOOK_SECRET", "no-se-usa")
+import puente  # noqa: E402  (carga el .env)
+import decidir  # noqa: E402
 
 ARCHIVOS = [a for a in sys.argv[1:] if a.endswith(".md")]
 FILTROS = [a.lower() for a in sys.argv[1:] if not a.endswith(".md")]
-
-with open(ARCHIVOS[0] if ARCHIVOS else "prompt_agente.md", encoding="utf-8") as archivo:
-    PROMPT = archivo.read()
+if ARCHIVOS:
+    with open(ARCHIVOS[0], encoding="utf-8") as archivo:
+        decidir.PROMPT = archivo.read()
 
 HOY = "martes 29/09/2026"
 MANANA = "miércoles 30/09/2026"
@@ -184,87 +190,91 @@ CASOS = [
 ]
 
 
-def calendario_de_prueba(turnos_previos):
-    turnos = [dict(t) for t in turnos_previos]
-    creados = 0
-
-    def ejecutar(nombre, datos):
-        nonlocal creados
-        if nombre == "buscar_turnos":
-            if not turnos:
-                return "Este cliente no tiene turnos futuros."
-            return "\n".join(
-                f"evento_id={t['evento_id']} | inicio={t['inicio']} | {t['titulo']}" for t in turnos
-            )
-        if nombre == "crear_turno":
-            creados += 1
-            turnos.append({"evento_id": f"prueba-{creados}", "inicio": datos["inicio"], "titulo": datos["titulo"]})
-            return f"Turno creado correctamente. evento_id=prueba-{creados}"
-        turno = next((t for t in turnos if t["evento_id"] == datos.get("evento_id")), None)
-        if nombre in ("mover_turno", "cancelar_turno") and turno is None:
-            return "ERROR: ese turno no es de este cliente. No se hizo nada."
-        if nombre == "mover_turno":
-            turno["inicio"] = datos["nuevo_inicio"]
-            return "Turno movido correctamente."
-        if nombre == "cancelar_turno":
-            turnos.remove(turno)
-            return f"Turno cancelado correctamente: {turno['titulo']} {turno['inicio']}"
-        if nombre == "avisar_al_dueno":
-            return "Aviso enviado al dueño."
-        return f"ERROR: la herramienta {nombre} no existe."
-
-    return ejecutar
+# ---------- Calendario de mentira, compartido: cada caso usa su propio teléfono ----------
+eventos = {}
+numeros = itertools.count(1)
 
 
-def enviar_linea(sesion_id, linea, ejecutar, salida):
-    # Igual que hablar_con_agente() en puente.py, pero con el calendario de prueba.
-    pendientes = []
-    with cliente.beta.sessions.events.stream(sesion_id) as stream:
-        cliente.beta.sessions.events.send(
-            sesion_id,
-            events=[{"type": "user.message", "content": [{"type": "text", "text": linea}]}],
-        )
-        for evento in stream:
-            if evento.type == "agent.message":
-                for bloque in evento.content:
-                    salida.append(f"   AGENTE: {bloque.text}")
-            elif evento.type == "agent.custom_tool_use":
-                salida.append(f"   [{evento.name}] {evento.input}")
-                pendientes.append(evento)
-            elif evento.type == "session.status_idle":
-                motivo = getattr(getattr(evento, "stop_reason", None), "type", None)
-                if motivo == "requires_action" and pendientes:
-                    resultados = [{
-                        "type": "user.custom_tool_result",
-                        "custom_tool_use_id": uso.id,
-                        "content": [{"type": "text", "text": ejecutar(uso.name, uso.input)}],
-                    } for uso in pendientes]
-                    pendientes = []
-                    cliente.beta.sessions.events.send(sesion_id, events=resultados)
-                else:
-                    break
+def insertar_evento(evento):
+    evento = dict(evento, id=f"prueba-{next(numeros)}")
+    eventos[evento["id"]] = evento
+    return evento
+
+
+puente.listar_eventos = lambda tel: sorted(
+    (e for e in eventos.values() if e["extendedProperties"]["private"]["telefono"] == tel),
+    key=lambda e: e["start"]["dateTime"])
+puente.obtener_evento = lambda evento_id: dict(eventos[evento_id])
+puente.insertar_evento = insertar_evento
+puente.actualizar_evento = lambda evento: eventos.update({evento["id"]: evento})
+puente.borrar_evento = lambda evento_id: eventos.pop(evento_id)
+puente.avisar_al_dueno = lambda texto: None
+
+FECHA = re.compile(r"^\[\w+ (\d\d/\d\d/\d{4} \d\d:\d\d)\]")
+CLIENTE = re.compile(r"\] CLIENTE \((\d+), ([^)]*)\)")
 
 
 def correr(caso):
     salida = ["=" * 70, f"CASO: {caso['nombre']}", f"ESPERADO: {caso['esperado']}"]
-    sesion = cliente.beta.sessions.create(
-        agent={"type": "agent_with_overrides", "id": os.environ["AGENT_ID"], "system": PROMPT},
-        environment_id=os.environ["ENVIRONMENT_ID"],
-        title=f"Prueba de prompt: {caso['nombre']}",
-    )
-    ejecutar = calendario_de_prueba(caso.get("turnos_previos", []))
-    try:
-        for linea in caso["lineas"]:
-            salida.append("\n>> " + linea.replace("\n", " / "))
-            enviar_linea(sesion.id, linea, ejecutar, salida)
-    except Exception as error:
-        salida.append(f"   ERROR DE LA PRUEBA: {error}")
-    finally:
-        cliente.beta.sessions.archive(session_id=sesion.id)
-    return "\n".join(salida)
+    telefono, nombre = next(CLIENTE.search(l).groups() for l in caso["lineas"] if CLIENTE.search(l))
+    for turno in caso.get("turnos_previos", []):
+        insertar_evento({"summary": turno["titulo"], "start": {"dateTime": turno["inicio"]},
+                         "end": {"dateTime": turno["inicio"]},
+                         "extendedProperties": {"private": {"telefono": telefono}}})
+
+    # Partir en tandas: un mensaje a menos de ESPERA del anterior va en la misma tanda.
+    tandas, anterior = [], None
+    for linea in caso["lineas"]:
+        cuando = datetime.strptime(FECHA.match(linea).group(1), "%d/%m/%Y %H:%M")
+        if anterior is None or cuando - anterior > decidir.ESPERA:
+            tandas.append([])
+        tandas[-1].append(linea)
+        anterior = cuando
+
+    leidas, previas, costo_total, llamadas = [], [], 0.0, 0
+    for tanda in tandas:
+        for linea in tanda:
+            salida.append(">> " + linea.replace("\n", " / "))
+        turnos = puente.turnos_del_cliente(telefono)
+        if not decidir.hay_que_evaluar(tanda, leidas, bool(turnos)):
+            salida.append("   (nadie contestó todavía: no se le pregunta al modelo)")
+            leidas += tanda
+            continue
+        ahora = datetime.strptime(FECHA.match(tanda[-1]).group(1), "%d/%m/%Y %H:%M") + decidir.ESPERA
+        pedido = decidir.armar_pedido(puente.con_dia(ahora), telefono, nombre, leidas, tanda, turnos, previas)
+        try:
+            decision, uso = decidir.decidir(puente.cliente, pedido)
+        except Exception as error:
+            salida.append(f"   ERROR DE LA PRUEBA: {error}")
+            break
+        resultados = puente.aplicar(decision, telefono, turnos)
+        costo = decidir.costo(uso)
+        costo_total += costo
+        llamadas += 1
+        for accion in decision.acciones:
+            salida.append(f"   [{accion.tipo}] " + ", ".join(
+                f"{k}={v}" for k, v in accion.model_dump().items() if v is not None and k != "tipo"))
+        if decision.aviso_al_dueno:
+            salida.append(f"   [aviso al dueño] {decision.aviso_al_dueno}")
+        salida.append(f"   RESUMEN: {decision.resumen}")
+        salida.append(f"   -> {'; '.join(resultados) or 'sin cambios'}  "
+                      f"(US$ {costo:.4f}; caché leída {uso.cache_read_input_tokens or 0}, "
+                      f"escrita {uso.cache_creation_input_tokens or 0}, salida {uso.output_tokens})")
+        aviso = f" (aviso al dueño: {decision.aviso_al_dueno})" if decision.aviso_al_dueno else ""
+        previas.append(f"[{puente.con_dia(ahora)}] {decision.resumen}{aviso}")
+        leidas += tanda
+    salida.append(f"   TOTAL DEL CASO: {llamadas} llamada(s), US$ {costo_total:.4f}")
+    return "\n".join(salida), llamadas, costo_total, len(caso["lineas"])
 
 
+elegidos = [c for c in CASOS if not FILTROS or any(f in c["nombre"].lower() for f in FILTROS)]
 with ThreadPoolExecutor(max_workers=7) as hilos:
-    elegidos = [c for c in CASOS if not FILTROS or any(f in c["nombre"].lower() for f in FILTROS)]
-    for resultado in hilos.map(correr, elegidos):
-        print(resultado)
+    resultados = list(hilos.map(correr, elegidos))
+for texto, *_ in resultados:
+    print(texto)
+llamadas = sum(r[1] for r in resultados)
+costo = sum(r[2] for r in resultados)
+mensajes = sum(r[3] for r in resultados)
+print("=" * 70)
+print(f"MODELO {decidir.MODELO}: {mensajes} mensajes, {llamadas} llamadas al modelo, US$ {costo:.4f} "
+      f"(US$ {costo / max(mensajes, 1):.5f} por mensaje)")
