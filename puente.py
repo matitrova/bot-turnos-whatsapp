@@ -1,10 +1,16 @@
+import hashlib
+import hmac
 import os
+import queue
+import subprocess
+import tempfile
 import threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from flask import Flask, request
 import anthropic
+import requests
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
@@ -13,8 +19,12 @@ cliente = anthropic.Anthropic()
 AGENT_ID = os.environ["AGENT_ID"]
 ENVIRONMENT_ID = os.environ["ENVIRONMENT_ID"]
 CALENDAR_ID = os.environ["CALENDAR_ID"]
+KAPSO_API_KEY = os.environ["KAPSO_API_KEY"]
+KAPSO_WEBHOOK_SECRET = os.environ["KAPSO_WEBHOOK_SECRET"]
 ZONA = ZoneInfo("America/Argentina/Buenos_Aires")
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+MODELO_WHISPER = "modelos/ggml-small.bin"
+ANTIGUEDAD_MAXIMA = timedelta(hours=24)  # los mensajes más viejos no se atienden
 
 credenciales = service_account.Credentials.from_service_account_file(
     "google-credenciales.json",
@@ -26,7 +36,7 @@ app = Flask(__name__)
 
 sesiones = {}              # teléfono del cliente -> sesión del agente
 procesados = set()         # ids de mensajes ya procesados
-candado = threading.Lock() # para que el agente atienda de a un mensaje por vez
+cola = queue.Queue()       # los mensajes se atienden de a uno y en el orden en que llegaron
 
 
 # ---------- Herramientas: las ejecuta el puente, no el agente ----------
@@ -102,9 +112,62 @@ def ejecutar_herramienta(nombre, datos, telefono):
         return f"ERROR: {error}"
 
 
+# ---------- Audios ----------
+
+def transcribir_archivo(ruta):
+    with tempfile.TemporaryDirectory() as carpeta:
+        wav = os.path.join(carpeta, "audio.wav")
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-i", ruta, "-ar", "16000", "-ac", "1", wav],
+                       check=True)
+        salida = subprocess.run(["whisper-cli", "-m", MODELO_WHISPER, "-l", "es", "-nt", "-np", "-f", wav],
+                                check=True, capture_output=True, text=True)
+    return " ".join(salida.stdout.split())
+
+
+def transcribir_audio(mensaje, phone_number_id):
+    # Kapso transcribe solo los audios que llegan de los clientes. Los que manda
+    # el lavadero desde su celular se bajan de Kapso y se transcriben acá.
+    transcripcion = (mensaje.get("kapso", {}).get("transcript") or {}).get("text")
+    if transcripcion:
+        return transcripcion
+    media = requests.get(
+        f"https://api.kapso.ai/meta/whatsapp/v24.0/{mensaje['audio']['id']}",
+        params={"phone_number_id": phone_number_id},
+        headers={"X-API-Key": KAPSO_API_KEY},
+        timeout=30,
+    )
+    media.raise_for_status()
+    audio = requests.get(media.json()["download_url"], timeout=60)
+    audio.raise_for_status()
+    with tempfile.NamedTemporaryFile(suffix=".ogg") as archivo:
+        archivo.write(audio.content)
+        archivo.flush()
+        return transcribir_archivo(archivo.name)
+
+
 # ---------- Conversación con el agente ----------
 
-def armar_linea(mensaje, conversacion):
+def texto_del_mensaje(mensaje, phone_number_id):
+    tipo = mensaje.get("type")
+    if tipo == "text":
+        return mensaje["text"]["body"]
+    if tipo == "audio":
+        try:
+            return "[AUDIO transcripto, puede tener errores] " + transcribir_audio(mensaje, phone_number_id)
+        except Exception as error:
+            print("No se pudo transcribir el audio:", error)
+            return "[AUDIO]"
+    if tipo == "location":
+        lugar = mensaje["location"]
+        partes = [lugar.get("name"), lugar.get("address"),
+                  f"https://maps.google.com/?q={lugar['latitude']},{lugar['longitude']}"]
+        return "[UBICACIÓN] " + " — ".join(p for p in partes if p)
+    if tipo == "image" and mensaje.get("image", {}).get("caption"):
+        return "[IMAGEN] " + mensaje["image"]["caption"]
+    return f"[{str(tipo).upper()}]"
+
+
+def armar_linea(mensaje, conversacion, phone_number_id):
     if mensaje.get("timestamp"):
         fecha = datetime.fromtimestamp(int(mensaje["timestamp"]), ZONA)
     else:
@@ -120,88 +183,117 @@ def armar_linea(mensaje, conversacion):
     else:
         quien = "LAVADERO"
 
-    if mensaje.get("type") == "text":
-        texto = mensaje["text"]["body"]
-    else:
-        texto = f"[{str(mensaje.get('type')).upper()}]"
-
-    return f"[{fecha}] {quien}: {texto}"
+    return f"[{fecha}] {quien}: {texto_del_mensaje(mensaje, phone_number_id)}"
 
 
 def hablar_con_agente(telefono, linea):
-    with candado:
-        if telefono not in sesiones:
-            sesion = cliente.beta.sessions.create(
-                agent=AGENT_ID,
-                environment_id=ENVIRONMENT_ID,
-                title=f"WhatsApp {telefono}",
-            )
-            sesiones[telefono] = sesion.id
-            print("Sesión nueva para", telefono, "->", sesion.id)
-        sesion_id = sesiones[telefono]
+    if telefono not in sesiones:
+        sesion = cliente.beta.sessions.create(
+            agent=AGENT_ID,
+            environment_id=ENVIRONMENT_ID,
+            title=f"WhatsApp {telefono}",
+        )
+        sesiones[telefono] = sesion.id
+        print("Sesión nueva para", telefono, "->", sesion.id)
+    sesion_id = sesiones[telefono]
 
-        pendientes = []
-        with cliente.beta.sessions.events.stream(sesion_id) as stream:
-            cliente.beta.sessions.events.send(
-                sesion_id,
-                events=[{"type": "user.message", "content": [{"type": "text", "text": linea}]}],
-            )
-            for evento in stream:
-                print("   evento:", evento.type)
+    pendientes = []
+    with cliente.beta.sessions.events.stream(sesion_id) as stream:
+        cliente.beta.sessions.events.send(
+            sesion_id,
+            events=[{"type": "user.message", "content": [{"type": "text", "text": linea}]}],
+        )
+        for evento in stream:
+            print("   evento:", evento.type)
 
-                if evento.type == "agent.message":
-                    for bloque in evento.content:
-                        print("AGENTE:", bloque.text)
+            if evento.type == "agent.message":
+                for bloque in evento.content:
+                    print("AGENTE:", bloque.text)
 
-                elif evento.type == "agent.custom_tool_use":
-                    print(f"[Herramienta: {evento.name}] {evento.input}")
-                    pendientes.append(evento)
+            elif evento.type == "agent.custom_tool_use":
+                print(f"[Herramienta: {evento.name}] {evento.input}")
+                pendientes.append(evento)
 
-                elif evento.type == "session.status_idle":
-                    motivo = getattr(getattr(evento, "stop_reason", None), "type", None)
-                    print("   motivo:", motivo)
-                    if motivo == "requires_action" and pendientes:
-                        resultados = []
-                        for uso in pendientes:
-                            resultado = ejecutar_herramienta(uso.name, uso.input, telefono)
-                            print("   ->", resultado)
-                            resultados.append({
-                                "type": "user.custom_tool_result",
-                                "custom_tool_use_id": uso.id,
-                                "content": [{"type": "text", "text": resultado}],
-                            })
-                        pendientes = []
-                        cliente.beta.sessions.events.send(sesion_id, events=resultados)
-                    else:
-                        break
+            elif evento.type == "session.status_idle":
+                motivo = getattr(getattr(evento, "stop_reason", None), "type", None)
+                print("   motivo:", motivo)
+                if motivo == "requires_action" and pendientes:
+                    resultados = []
+                    for uso in pendientes:
+                        resultado = ejecutar_herramienta(uso.name, uso.input, telefono)
+                        print("   ->", resultado)
+                        resultados.append({
+                            "type": "user.custom_tool_result",
+                            "custom_tool_use_id": uso.id,
+                            "content": [{"type": "text", "text": resultado}],
+                        })
+                    pendientes = []
+                    cliente.beta.sessions.events.send(sesion_id, events=resultados)
+                else:
+                    break
 
 
 # ---------- Webhook de Kapso ----------
 
+def atender_cola():
+    while True:
+        mensaje, conversacion, phone_number_id = cola.get()
+        try:
+            linea = armar_linea(mensaje, conversacion, phone_number_id)
+            print(linea)
+            hablar_con_agente(conversacion["phone_number"], linea)
+        except Exception as error:
+            print("ERROR atendiendo el mensaje", mensaje.get("id"), "->", error)
+        finally:
+            cola.task_done()
+
+
+def firma_valida(cuerpo, firma):
+    esperada = hmac.new(KAPSO_WEBHOOK_SECRET.encode(), cuerpo, hashlib.sha256).hexdigest()
+    return bool(firma) and hmac.compare_digest(firma, esperada)
+
+
+def encolar(datos):
+    mensaje = datos["message"]
+    conversacion = datos["conversation"]
+
+    if mensaje.get("kapso", {}).get("origin") == "history_sync":
+        return  # chats viejos que Kapso importa: sirven para aprender, no para agendar
+    if mensaje.get("timestamp"):
+        enviado = datetime.fromtimestamp(int(mensaje["timestamp"]), ZONA)
+        if datetime.now(ZONA) - enviado > ANTIGUEDAD_MAXIMA:
+            print("Mensaje viejo, lo ignoro:", mensaje["id"], enviado)
+            return
+    if not conversacion.get("phone_number"):
+        print("Mensaje sin teléfono del cliente, lo ignoro:", mensaje["id"])
+        return
+    if mensaje["id"] in procesados:
+        print("Duplicado, lo ignoro:", mensaje["id"])
+        return
+    procesados.add(mensaje["id"])
+    cola.put((mensaje, conversacion, datos.get("phone_number_id")))
+
+
 @app.route("/webhook", methods=["POST"])
 def recibir_mensaje():
+    cuerpo = request.get_data()
+    if not firma_valida(cuerpo, request.headers.get("X-Webhook-Signature")):
+        print("Firma inválida: no viene de Kapso, lo rechazo")
+        return "firma invalida", 401
+
     tipo_evento = request.headers.get("X-Webhook-Event")
     print("Evento recibido:", tipo_evento)
     if tipo_evento and tipo_evento not in ("whatsapp.message.received", "whatsapp.message.sent"):
         return "ok", 200
 
     datos = request.get_json()
-    mensaje = datos["message"]
-    conversacion = datos["conversation"]
-
-    if mensaje["id"] in procesados:
-        print("Duplicado, lo ignoro:", mensaje["id"])
-        return "ok", 200
-    procesados.add(mensaje["id"])
-
-    linea = armar_linea(mensaje, conversacion)
-    print(linea)
-
-    threading.Thread(
-        target=hablar_con_agente,
-        args=(conversacion["phone_number"], linea),
-    ).start()
+    # Si en Kapso se activa el "buffering", los mensajes llegan de a varios.
+    for item in (datos["data"] if datos.get("batch") else [datos]):
+        encolar(item)
     return "ok", 200
 
 
-app.run(port=8000)
+threading.Thread(target=atender_cola, daemon=True).start()
+
+if __name__ == "__main__":
+    app.run(port=8000)

@@ -12,3 +12,9 @@ __pycache__/
 
 # macOS
 .DS_Store
+
+# Charlas y audios reales de clientes: datos personales, nunca al repo
+conversaciones-reales/
+
+# Modelo de Whisper para transcribir audios (466 MB)
+modelos/

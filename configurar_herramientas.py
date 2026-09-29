@@ -54,10 +54,10 @@ herramientas = [
     {
         "type": "custom",
         "name": "avisar_al_dueno",
-        "description": "Le manda un aviso al dueño del lavadero. Usala cada vez que canceles un turno.",
+        "description": "Le manda un aviso al dueño del lavadero. Usala cuando el cliente cancela un turno, y cuando se acuerda un día pero no una hora y por eso no creaste el turno.",
         "input_schema": {
             "type": "object",
-            "properties": {"mensaje": {"type": "string", "description": "Nombre, teléfono, servicio, día y hora del turno cancelado, y el mensaje del cliente"}},
+            "properties": {"mensaje": {"type": "string", "description": "Qué pasó, con nombre y teléfono del cliente, servicio, día y hora si la hay, y el mensaje textual del cliente"}},
             "required": ["mensaje"],
         },
     },
